@@ -157,18 +157,38 @@ fn check_vulkan_sdk_version(path: &Path) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+fn host_target() -> String {
+    let output = std::process::Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .expect("failed to invoke rustc");
+
+    std::str::from_utf8(&output.stdout)
+        .expect("rustc didn't return valid UTF-8")
+        .lines()
+        .find_map(|l| l.strip_prefix("host: "))
+        .expect("failed to query rustc for the host target triple")
+        .to_owned()
+}
+
 fn main() {
-    // Don't attempt to build shaderc native library on docs.rs
+    // Don't attempt to build shaderc native library on docs.rs when cross-compiling.
     if env::var("DOCS_RS").is_ok() {
-        println!(
-            "cargo:warning=shaderc: docs.rs detected, will not attempt to link against shaderc"
-        );
-        return;
+        let is_cross_compiling = env::var("TARGET").unwrap() != host_target();
+
+        if is_cross_compiling {
+            println!(
+                "cargo:warning=shaderc: docs.rs cross-compilation detected, will not attempt to \
+                link against shaderc",
+            );
+            return;
+        }
     }
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap();
     let config_build_from_source = env::var("CARGO_FEATURE_BUILD_FROM_SOURCE").is_ok();
+    let config_prefer_static_linking = env::var("CARGO_FEATURE_PREFER_STATIC_LINKING").is_ok();
     let has_explicit_set_search_dir = env::var("SHADERC_LIB_DIR").is_ok();
 
     // Initialize explicit shaderc search directory first.
@@ -275,12 +295,17 @@ fn main() {
         let dylib_path = search_dir.join(dylib_name);
 
         if let Some((lib_name, lib_kind)) = {
-            if dylib_path.exists() {
-                Some((SHADERC_SHARED_LIB, "dylib"))
-            } else if static_lib_path.exists() {
-                Some((SHADERC_STATIC_LIB, "static"))
-            } else {
-                None
+            match (
+                dylib_path.exists(),
+                static_lib_path.exists(),
+                config_prefer_static_linking,
+            ) {
+                // If dylib not exist OR prefer static lib and static lib exist, static.
+                (false, true, _) | (_, true, true) => Some((SHADERC_STATIC_LIB, "static")),
+                // Otherwise, if dylib exist, dynamic.
+                (true, _, _) => Some((SHADERC_SHARED_LIB, "dylib")),
+                // Neither dylib nor static lib exist.
+                _ => None,
             }
         } {
             match (target_os.as_str(), target_env.as_str()) {
